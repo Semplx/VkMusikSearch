@@ -25,10 +25,12 @@ from datetime import datetime, timedelta
 lp_server_re = re.compile("^.+\.vk\.com")
 lp_url_re = re.compile("im\d+$")
 search_re = re.compile('^[Ss]\s+(.+)$')
-help_re = re.compile("^[Hh]\s*")
+help_re = re.compile("^[Hh]\s*$")
+next_re = re.compile("^[Nn]\s*$")
 token = ""
 searchers = []
 update_time = datetime.now() + timedelta(minutes=5)
+
 
 def get_response(connection, url):
     #print url
@@ -49,7 +51,19 @@ def call_method(access_token, method, **kwargs):
     result = get_response(connection, url)
     j_result = json.loads(result)
     if "error" in j_result.keys():
-        raise Exception("Error: " + result)
+        if (j_result["error"]["error_code"]) == 14:
+            captcha_sid = j_result["error"]["captcha_sid"]
+            print "Need to enter captcha: " + j_result["error"]["captcha_img"]
+            captcha_key = sys.stdin.readline().replace('\n', '')
+            new_kwargs = kwargs
+            new_kwargs["captcha_sid"] = captcha_sid
+            new_kwargs["captcha_key"] = captcha_key
+            try:
+                call_method(access_token=access_token, method=method, **new_kwargs)
+            except Exception as e:
+                print e.Message
+        else:
+            raise Exception("Error: " + result)
     #print result
     return j_result
 
@@ -68,10 +82,27 @@ def get_long_poll(server, key, ts):
     updates = j_result["updates"]
     return new_ts, updates
 
-def music_search(u_id, search_string):
+
+def music_search(u_id, search_string, next_page):
     number = 0
+    page = 1
+    if next_page:
+        for searcher in searchers:
+            if searcher["u_id"] == u_id:
+                my_search_string = searcher["value"]
+                page = searcher["page"] + 1
+                searchers.remove(searcher)
+                break
+        else:
+            raise Exception("no search")
+    else:
+        for searcher in searchers:
+            if searcher["u_id"] == u_id:
+                searchers.remove(searcher)
+        my_search_string = search_string
     try:
-        search_j_result = call_method(token, "audio.search", q=search_string, auto_complete=str(1), count=str(10))
+        search_j_result = call_method(token, "audio.search", q=my_search_string, auto_complete=str(1),
+                                      offset=str((page - 1) * 10), count=str(10))
         attachments_str = ""
         response = search_j_result["response"]
         for audio in response:
@@ -83,7 +114,12 @@ def music_search(u_id, search_string):
                     attachment += ","
                 attachments_str += attachment
         try:
-            call_method(token, "messages.send", user_id=str(u_id), message="Found "+str(number)+" tracks:", attachment=attachments_str)
+            call_method(token, "messages.send", user_id=str(u_id),
+                        message="Found "+str(number)+" tracks, page "+str(page)+" (n for next):",
+                        attachment=attachments_str)
+            searchers.append({'u_id': u_id, 'type': 1, 'value': my_search_string, 'page': page,
+                              'datetime': datetime.now()})
+            print searchers
         except Exception as e:
             print e.message
     except Exception as e:
@@ -101,9 +137,9 @@ if __name__ == "__main__":
         tss = lp_response["response"]["ts"]
         first_response = True
         while 1:
-            if datetime.now() >= update_time:
-                searchers = []
-                update_time = datetime.now() + timedelta(minutes=5)
+            for searcher in searchers:
+                if datetime.now() >= searcher["datetime"] + timedelta(minutes=5):
+                    searchers.remove(searcher)
             try:
                 ts_new, upds = get_long_poll(server=serv, key=k, ts=tss)
                 #print upds
@@ -118,7 +154,13 @@ if __name__ == "__main__":
                         ans_msg = ""
                         if search_re.match(in_msg):
                             #ans_msg = "Search: "+search_re.findall(in_msg)[0].encode('utf-8')
-                            music_search(user_id, search_re.findall(in_msg)[0].encode('utf-8'))
+                            music_search(user_id, search_re.findall(in_msg)[0].encode('utf-8'), False)
+                        elif next_re.match(in_msg):
+                            try:
+                                music_search(user_id, "", True)
+                            except Exception:
+                                call_method(token, "messages.send", user_id=str(user_id),
+                                            message="You didn't search anything")
                         elif help_re.match(in_msg):
                             ans_msg = "Type: s SEARCH_WORDS to search."
                         else:
@@ -134,8 +176,5 @@ if __name__ == "__main__":
                 k = lp_response["response"]["key"]
                 serv = lp_response["response"]["server"]
                 tss = lp_response["response"]["ts"]
-
-
-
     else:
         print "Format: VkMusikSearch.py token"
